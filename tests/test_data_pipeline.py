@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -103,7 +104,8 @@ def test_batch_download_skips_cached(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         calls.append((kepid, quarter))
         path = Path(cache_dir) / f"kic_{kepid}_q{quarter}.pkl"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"cached")
+        with path.open("wb") as handle:
+            pickle.dump({"time": np.array([0.0, 1.0]), "flux": np.array([1.0, 1.0])}, handle)
         return {"ok": True}
 
     monkeypatch.setattr("manta.data.downloader.download_lightcurve", fake_download)

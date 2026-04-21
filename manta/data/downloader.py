@@ -15,6 +15,7 @@ import logging
 import pickle
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import numpy as np
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
@@ -191,6 +192,71 @@ def _select_flux(lightcurve: Any) -> Any:
     return lightcurve
 
 
+def _to_numpy_detached(values: Any, dtype: Any) -> np.ndarray:
+    """Convert Quantity-like or masked values to detached NumPy arrays."""
+    base = getattr(values, "value", values)
+    arr = np.asarray(base)
+    if np.ma.isMaskedArray(arr):
+        arr = np.ma.filled(arr, np.nan)
+    return np.array(arr, dtype=dtype, copy=True)
+
+
+def _serialize_lightcurve(lightcurve: Any, kepler_id: int, quarter: int) -> dict[str, Any]:
+    """Create a pickle-safe, file-detached light-curve payload.
+
+    Lightkurve objects may keep references to FITS internals that are not
+    pickle-safe in all environments. Persisting plain arrays avoids this.
+    """
+    time_values = getattr(lightcurve, "time", None)
+    flux_values = getattr(lightcurve, "flux", None)
+
+    if time_values is None or flux_values is None:
+        try:
+            time_values = lightcurve["time"]
+            flux_values = lightcurve["flux"]
+        except Exception as exc:  # pragma: no cover - defensive
+            raise DataUnavailableError(
+                kepler_id=kepler_id,
+                quarter=quarter,
+                details=f"light curve object missing time/flux fields: {exc}",
+            ) from exc
+
+    time = _to_numpy_detached(time_values, np.float64).reshape(-1)
+    flux = _to_numpy_detached(flux_values, np.float64).reshape(-1)
+
+    if time.size == 0 or flux.size == 0:
+        raise DataUnavailableError(
+            kepler_id=kepler_id,
+            quarter=quarter,
+            details="downloaded light curve has empty time/flux arrays",
+        )
+
+    if time.size != flux.size:
+        n = min(time.size, flux.size)
+        time = time[:n]
+        flux = flux[:n]
+
+    return {
+        "time": time,
+        "flux": flux,
+        "meta": {"kepler_id": int(kepler_id), "quarter": int(quarter)},
+    }
+
+
+def _is_valid_cached_payload(payload: Any) -> bool:
+    """Check whether a cached payload is usable for downstream processing."""
+    if isinstance(payload, dict) and "time" in payload and "flux" in payload:
+        try:
+            t = np.asarray(payload["time"]).reshape(-1)
+            f = np.asarray(payload["flux"]).reshape(-1)
+        except Exception:
+            return False
+        return t.size > 0 and f.size > 0 and t.size == f.size
+
+    # Backward compatibility for older caches storing raw lightkurve objects.
+    return hasattr(payload, "time") and hasattr(payload, "flux")
+
+
 def _cache_lightcurve_path(cache_dir: str | Path, kepler_id: int, quarter: int) -> Path:
     """Build cache path for a specific star-quarter light curve."""
     base = Path(cache_dir)
@@ -222,9 +288,32 @@ def download_lightcurve(kepler_id: int, quarter: int, cache_dir: str | Path) -> 
     """
     cache_path = _cache_lightcurve_path(cache_dir=cache_dir, kepler_id=kepler_id, quarter=quarter)
     if cache_path.exists():
-        with cache_path.open("rb") as handle:
-            LOGGER.debug("Loaded cached light curve for KIC %d Q%d", kepler_id, quarter)
-            return pickle.load(handle)
+        try:
+            with cache_path.open("rb") as handle:
+                cached = pickle.load(handle)
+            if _is_valid_cached_payload(cached):
+                LOGGER.debug("Loaded cached light curve for KIC %d Q%d", kepler_id, quarter)
+                return cached
+
+            LOGGER.warning(
+                "Invalid cached payload for KIC %d Q%d at %s; re-downloading",
+                kepler_id,
+                quarter,
+                cache_path,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed reading cached light curve for KIC %d Q%d at %s (%s); re-downloading",
+                kepler_id,
+                quarter,
+                cache_path,
+                exc,
+            )
+
+        try:
+            cache_path.unlink()
+        except OSError:
+            pass
 
     lk = _import_lightkurve()
 
@@ -237,27 +326,28 @@ def download_lightcurve(kepler_id: int, quarter: int, cache_dir: str | Path) -> 
             details="no matching long-cadence light curve in archive",
         )
 
-    try:
-        lc = search.download(quality_bitmask="default")
-    except Exception as exc:
-        raise DataUnavailableError(
-            kepler_id=kepler_id,
-            quarter=quarter,
-            details=f"download failed: {exc}",
-        ) from exc
+    lc = None
+    last_download_exc: Exception | None = None
+    for _ in range(3):
+        try:
+            lc = search.download(quality_bitmask="default")
+            if lc is not None:
+                break
+        except Exception as exc:
+            last_download_exc = exc
 
     if lc is None:
-        raise DataUnavailableError(
-            kepler_id=kepler_id,
-            quarter=quarter,
-            details="search result returned no downloadable product",
-        )
+        details = "search result returned no downloadable product"
+        if last_download_exc is not None:
+            details = f"download failed: {last_download_exc}"
+        raise DataUnavailableError(kepler_id=kepler_id, quarter=quarter, details=details)
 
     selected = _select_flux(lc)
+    payload = _serialize_lightcurve(selected, kepler_id=kepler_id, quarter=quarter)
     with cache_path.open("wb") as handle:
-        pickle.dump(selected, handle)
+        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
     LOGGER.debug("Cached light curve for KIC %d Q%d at %s", kepler_id, quarter, cache_path)
-    return selected
+    return payload
 
 
 def _infer_column(df: pd.DataFrame, candidates: tuple[str, ...]) -> str:
@@ -311,7 +401,31 @@ def batch_download(
     def _job(kepid: int, quarter: int) -> tuple[int, int, str | None]:
         cache_path = _cache_lightcurve_path(cache_dir=cache_dir, kepler_id=kepid, quarter=quarter)
         if cache_path.exists():
-            return kepid, quarter, "skipped"
+            try:
+                with cache_path.open("rb") as handle:
+                    cached = pickle.load(handle)
+                if _is_valid_cached_payload(cached):
+                    return kepid, quarter, "skipped"
+
+                LOGGER.warning(
+                    "Invalid cached payload for KIC %d Q%d at %s; re-downloading",
+                    kepid,
+                    quarter,
+                    cache_path,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to read cached payload for KIC %d Q%d at %s (%s); re-downloading",
+                    kepid,
+                    quarter,
+                    cache_path,
+                    exc,
+                )
+
+            try:
+                cache_path.unlink()
+            except OSError:
+                pass
         try:
             # Positional call keeps compatibility with monkeypatched test doubles.
             download_lightcurve(kepid, quarter, cache_dir)
