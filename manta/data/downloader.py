@@ -13,6 +13,8 @@ from typing import Any
 
 import logging
 import pickle
+import re
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -29,6 +31,11 @@ DEFAULT_TIMEOUT_SECONDS: float = 30.0
 DEFAULT_RETRIES: int = 3
 DEFAULT_BACKOFF_FACTOR: float = 0.5
 SUPPORTED_FLUX_PRIORITY: tuple[str, ...] = ("pdcsap_flux", "sap_flux", "flux")
+CORRUPT_CACHE_HINTS: tuple[str, ...] = (
+    "file may be corrupt due to an interrupted download",
+    "file may have been truncated",
+    "error in reading data product",
+)
 
 
 class DataUnavailableError(RuntimeError):
@@ -257,6 +264,59 @@ def _is_valid_cached_payload(payload: Any) -> bool:
     return hasattr(payload, "time") and hasattr(payload, "flux")
 
 
+def _looks_like_lightkurve_cache_corruption(message: str) -> bool:
+    """Return True if an exception message suggests a corrupted FITS cache file."""
+    lowered = message.lower()
+    return any(hint in lowered for hint in CORRUPT_CACHE_HINTS)
+
+
+def _extract_data_product_path(message: str) -> Path | None:
+    """Extract cached data-product path from Lightkurve/astroquery error text."""
+    match = re.search(r"Data product (.+?) of type", message)
+    if not match:
+        return None
+    try:
+        return Path(match.group(1).strip())
+    except Exception:
+        return None
+
+
+def _purge_lightkurve_cache(kepler_id: int, error_message: str | None = None) -> None:
+    """Delete corrupted Lightkurve cache files for a target and retry cleanly."""
+    explicit_path = _extract_data_product_path(error_message or "")
+    if explicit_path is not None:
+        try:
+            if explicit_path.exists():
+                explicit_path.unlink()
+                LOGGER.warning("Removed corrupted Lightkurve file %s", explicit_path)
+        except OSError:
+            pass
+
+        try:
+            parent_dir = explicit_path.parent
+            if parent_dir.exists() and parent_dir.is_dir():
+                shutil.rmtree(parent_dir, ignore_errors=True)
+                LOGGER.warning("Removed corrupted Lightkurve directory %s", parent_dir)
+        except OSError:
+            pass
+
+    # Also clear any per-target cache directories to avoid stale partial files.
+    mast_kepler_dir = Path.home() / ".lightkurve" / "cache" / "mastDownload" / "Kepler"
+    if not mast_kepler_dir.exists():
+        return
+
+    target_prefix = f"kplr{kepler_id:09d}_lc_"
+    for candidate in mast_kepler_dir.glob(f"{target_prefix}*"):
+        try:
+            if candidate.is_dir():
+                shutil.rmtree(candidate, ignore_errors=True)
+            else:
+                candidate.unlink()
+            LOGGER.warning("Purged stale Lightkurve cache artifact %s", candidate)
+        except OSError:
+            continue
+
+
 def _cache_lightcurve_path(cache_dir: str | Path, kepler_id: int, quarter: int) -> Path:
     """Build cache path for a specific star-quarter light curve."""
     base = Path(cache_dir)
@@ -328,13 +388,27 @@ def download_lightcurve(kepler_id: int, quarter: int, cache_dir: str | Path) -> 
 
     lc = None
     last_download_exc: Exception | None = None
-    for _ in range(3):
+    download_dir = Path(cache_dir) / "_lightkurve_cache"
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    for _ in range(4):
         try:
-            lc = search.download(quality_bitmask="default")
+            try:
+                lc = search.download(quality_bitmask="default", download_dir=str(download_dir))
+            except TypeError:
+                lc = search.download(quality_bitmask="default")
             if lc is not None:
                 break
         except Exception as exc:
             last_download_exc = exc
+            details = str(exc)
+            if _looks_like_lightkurve_cache_corruption(details):
+                LOGGER.warning(
+                    "Detected corrupted Lightkurve cache for KIC %d Q%d; purging cache and retrying",
+                    kepler_id,
+                    quarter,
+                )
+                _purge_lightkurve_cache(kepler_id=kepler_id, error_message=details)
 
     if lc is None:
         details = "search result returned no downloadable product"
@@ -396,7 +470,15 @@ def batch_download(
     failures: list[str] = []
     downloaded = 0
 
-    LOGGER.info("Starting batch download for %d star-quarter pairs", len(pairs))
+    by_star: dict[int, list[int]] = {}
+    for kepid, quarter in pairs:
+        by_star.setdefault(int(kepid), []).append(int(quarter))
+
+    LOGGER.info(
+        "Starting batch download for %d star-quarter pairs across %d stars",
+        len(pairs),
+        len(by_star),
+    )
 
     def _job(kepid: int, quarter: int) -> tuple[int, int, str | None]:
         cache_path = _cache_lightcurve_path(cache_dir=cache_dir, kepler_id=kepid, quarter=quarter)
@@ -435,18 +517,27 @@ def batch_download(
             return kepid, quarter, f"unexpected error: {exc}"
         return kepid, quarter, None
 
+    def _job_star(kepid: int, quarters: list[int]) -> list[tuple[int, int, str | None]]:
+        star_results: list[tuple[int, int, str | None]] = []
+        for quarter in sorted(set(quarters)):
+            star_results.append(_job(kepid, quarter))
+        return star_results
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_job, kepid, quarter) for kepid, quarter in pairs]
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Downloading light curves"):
-            kepid, quarter, status = future.result()
-            if status == "skipped":
-                skipped += 1
-                continue
-            if status is None:
-                downloaded += 1
-                continue
-            failures.append(f"KIC {kepid} Q{quarter}: {status}")
-            LOGGER.warning("Download failed for KIC %d Q%d: %s", kepid, quarter, status)
+        futures = [executor.submit(_job_star, kepid, quarters) for kepid, quarters in by_star.items()]
+        with tqdm(total=len(pairs), desc="Downloading light curves") as pbar:
+            for future in as_completed(futures):
+                star_results = future.result()
+                pbar.update(len(star_results))
+                for kepid, quarter, status in star_results:
+                    if status == "skipped":
+                        skipped += 1
+                        continue
+                    if status is None:
+                        downloaded += 1
+                        continue
+                    failures.append(f"KIC {kepid} Q{quarter}: {status}")
+                    LOGGER.warning("Download failed for KIC %d Q%d: %s", kepid, quarter, status)
 
     summary = DownloadSummary(
         downloaded=downloaded,
