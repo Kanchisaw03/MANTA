@@ -1,0 +1,73 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Packaging/build
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Tool caches and reports
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local env/config
+.env
+.env.*
+*.local
+
+# Project runtime artifacts
+/data/
+/outputs/
+/checkpoints/
+/checkpoints_top5/
+*.ckpt
+*.pth
+*.pt
+
+# Logs/diagnostics
+*.log
+pytest_output*.txt
+
+# LaTeX build artifacts
+/paper/*.aux
+/paper/*.bbl
+/paper/*.bcf
+/paper/*.blg
+/paper/*.fdb_latexmk
+/paper/*.fls
+/paper/*.lof
+/paper/*.lot
+/paper/*.log
+/paper/*.out
+/paper/*.run.xml
+/paper/*.synctex.gz
+/paper/*.toc

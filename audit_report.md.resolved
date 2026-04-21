@@ -1,0 +1,221 @@
+# MANTA Codebase Audit Report
+
+**Auditor**: Senior ML Research Engineer & Astrophysics Software Reviewer  
+**Date**: 2026-04-19  
+**Scope**: Full codebase audit against implementation plan and physics claims  
+**Files reviewed**: 35 source files across `manta/`, `configs/`, `scripts/`, `tests/`, `paper/`
+
+---
+
+## EXECUTIVE SUMMARY
+
+The codebase is **substantially complete and impressively well-structured** for a pre-submission research prototype. All 5 physics-derived components exist as real, functional PyTorch modules with physically motivated docstrings. The main model assembles correctly and the training pipeline is production-grade with Kaggle-aware checkpointing. However, several issues range from a meaningful physics concern in the attention module to missing test coverage that would sink the paper under expert review.
+
+---
+
+## 1. CRITICAL FAILURES
+
+These directly contradict core architectural claims and must be fixed before any submission.
+
+### CF-1: Position-Aware Attention Uses Fixed Limb-Darkening Bias — Not Actually Position-Dependent on Input
+
+**File**: [position_aware_attention.py](file:///c:/Users/kanch/Desktop/manta/manta/models/components/position_aware_attention.py#L166-L181)  
+**Lines**: 166-181
+
+**Problem**: The "position" is computed as `torch.linspace(-1, 1, time_steps)` — a fixed linear ramp from -1 to +1 over the sequence length. This is then transformed through the limb-darkening law to produce a bias. But this bias is **identical for every input**. The same transit signal at the same sequence position always gets the same bias, regardless of impact parameter or actual stellar disk position.
+
+**Why this matters**: The paper's Constraint 1 claims "transit signal strength depends on WHERE on the stellar disk the planet is." But the model has no mechanism to know the planet's actual position on the disk. The phase-folded input is centered on the transit, so position 0 always corresponds to transit mid-point. The bias correctly gives higher weight to the center and lower weight to the edges, but **this doesn't encode impact parameter variation** — a transit chord crossing at b=0.9 (near limb) gets the same positional bias as b=0.0 (center).
+
+**Fix**: Either:
+1. Encode impact parameter `b` from TCE metadata as an input to the attention bias computation (the dataset already carries `stellar_params`), or  
+2. Reframe the claim: the attention encodes "position within the transit time-series relative to mid-transit" rather than "position on the stellar disk." This is still physically valid (limb darkening means mid-transit has different depth sensitivity than ingress/egress) but is a weaker claim that needs honest documentation.
+
+**Severity**: HIGH — a reviewer who reads both the paper's Constraint 1 derivation and the code will notice this disconnect.
+
+### CF-2: No Test Verifying Position-Aware Attention Produces Different Outputs for Different Stellar Disk Positions
+
+**File**: [test_models.py](file:///c:/Users/kanch/Desktop/manta/tests/test_models.py#L34-L53)  
+**Lines**: 34-53
+
+**Problem**: `test_attention_limb_darkening` checks that attention maps correlate with the limb-darkening profile (a correlation test), but does NOT test the critical claim: "the same flux pattern at different stellar disk positions produces DIFFERENT attention outputs." It feeds two different stars (different Teff/logg/feh) but the same position grid, so the test passes if the bias exists at all, not if it meaningfully differentiates positions.
+
+**Fix**: Add a test that:
+1. Creates two identical input sequences
+2. Provides different `stellar_params` with significantly different u1/u2 (e.g., solar vs M-dwarf)
+3. Asserts that the outputs are NOT equal (with a meaningful tolerance)
+4. Optionally asserts that the attention weight distribution differs between center-heavy and limb-heavy stars
+
+---
+
+## 2. PHYSICS VIOLATIONS
+
+### PV-1: Frequency Decomposition Applied to Phase-Folded Data, Not Raw Time-Series
+
+**File**: [dataset.py](file:///c:/Users/kanch/Desktop/manta/manta/data/dataset.py#L240-L246)  
+**Lines**: 240-246
+
+**Problem**: The frequency decomposition is applied to the **phase-folded global view** (line 242: `flux=global_view`), not to the raw time-series. Phase folding fundamentally destroys the temporal structure that frequency decomposition is designed to separate. After folding, starspot modulation, granulation, and p-modes are all aliased into the folded profile — their original frequency relationships are lost.
+
+**Why this matters**: Constraint 5's entire physical justification is "starspots, granulation, and oscillations occupy distinct frequency bands." This is true of the RAW time-series. After phase-folding, the frequency content is meaningless — it's the spatial frequency of the folded profile, not the temporal frequency of stellar variability.
+
+**Fix**: Either:
+1. Perform frequency decomposition on the raw (pre-fold) light curve, then phase-fold each band separately, or  
+2. Reframe Constraint 5's role: the parallel branches with different kernel sizes still provide useful multi-scale feature extraction on the folded data, but the physical justification shifts from "frequency separation" to "multi-scale morphological analysis." The current FFT decomposition on folded data should be removed or made optional.
+
+**Severity**: HIGH — this is the most serious physics violation. A stellar physics reviewer will immediately flag this.
+
+### PV-2: In-Model Fallback Decomposition Also Uses Phase-Folded Data
+
+**File**: [manta.py](file:///c:/Users/kanch/Desktop/manta/manta/models/manta.py#L162-L212)  
+**Lines**: 162-212
+
+**Problem**: `_decompose_global_view_torch` decomposes the global view tensor directly, which is already phase-folded. Same issue as PV-1 but in the torch fallback path.
+
+### PV-3: Starspot Band Mask Overlap with Granulation
+
+**File**: [frequency_decomposer.py](file:///c:/Users/kanch/Desktop/manta/manta/data/frequency_decomposer.py#L157-L162)  
+**Lines**: 157-162
+
+**Problem**: The starspot mask is constrained to `frequencies <= F_GRAN_CYCLES_PER_DAY` (3 c/d). The granulation mask explicitly excludes the starspot mask via `~starspot_mask`. This is correct in logic, BUT the starspot rotation frequency for rapidly rotating stars could exceed 3 c/d (P_rot < 8 hours), which would place the starspot peak outside the starspot mask entirely. The mask would then capture nothing.
+
+**Fix**: Allow the starspot mask upper bound to extend to at least `2 * rotation_freq + rotation_half_width` or remove the F_GRAN cap.
+
+---
+
+## 3. MISSING COMPONENTS
+
+### MC-1: No Inference Script
+The audit checklist requires an inference script for running on a new light curve. The `scripts/` directory has `evaluate.py` but no `predict.py` or `infer.py` for single-target inference.
+
+### MC-2: No Test for Frequency Branch Selectivity
+No test verifies that the three parallel frequency branches respond differently to frequency-separated synthetic signals. This is a core physics test from the checklist.
+
+### MC-3: No Integration Test on Realistic Light Curve
+No test runs a full forward pass on a real or realistic Kepler-like transit light curve (with transit-shaped dip, baseline noise, etc.). The existing `test_manta_forward_pass` uses random data.
+
+### MC-4: No Ablation YAML Configs
+The `configs/` directory has `manta_default.yaml` and `astronet_baseline.yaml` but no ablation-specific configs. The `run_ablation.py` script exists and presumably constructs ablation variants programmatically, but having explicit configs per ablation would improve reproducibility.
+
+### MC-5: No Visualization Module for Paper Figures
+The implementation plan specifies a `visualization/` module with 8 figure generators. The codebase has `manta/evaluation/visualizer.py` but this is limited and doesn't cover architecture diagrams, activation curves, or the other planned figures.
+
+### MC-6: No `requirements.txt` Version Pinning
+**File**: [requirements.txt](file:///c:/Users/kanch/Desktop/manta/requirements.txt)  
+Versions are listed as `>=` minimum bounds, not pinned (`==`). For reproducibility of a published result, exact versions are needed.
+
+---
+
+## 4. WEAK IMPLEMENTATIONS
+
+### WI-1: EllipticMish Bessel-K0 Connection to Elliptic Integrals is Tenuous
+
+**File**: [elliptic_activation.py](file:///c:/Users/kanch/Desktop/manta/manta/models/components/elliptic_activation.py#L42-L87)
+
+The docstring says "Bessel-K0 modulation approximates near-singular curvature around grazing-geometry regimes." While both Bessel functions and elliptic integrals appear in transit physics, the modified Bessel function K₀ is not directly related to the complete elliptic integrals K(k), E(k), Π(n,k) that appear in Mandel-Agol. The connection is aesthetic, not mathematical.
+
+**Impact**: A mathematical reviewer will ask "show me the derivation from Mandel-Agol Eq. (X) to this activation function." The current answer is "both involve special functions" — which is weak.
+
+**Fix option**: Replace Bessel-K0 with a parameterized elliptic-integral-inspired form, e.g., using the known series expansion of K(k) near k=1, or simply strengthen the documentation to say "inspired by the qualitative behavior of elliptic integrals" rather than claiming a mathematical derivation.
+
+### WI-2: PhysicsConstrainedOutput Uses Standard Sigmoid, Not Hard Bound
+
+**File**: [physics_output.py](file:///c:/Users/kanch/Desktop/manta/manta/models/components/physics_output.py#L71-L77)
+
+The implementation plan specified `HardSigmoid` (piecewise linear, reaches exactly 0 and 1). The actual code uses `torch.sigmoid` + `torch.clamp(min=1e-6, max=1-1e-6)`. This is effectively soft-bounded — it never reaches exactly 0 or 1. While the clamp is a hard numerical bound, the sigmoid is still the activation, not a hard physical bound.
+
+**Impact**: Low — the claim "output is bounded in [0,1]" is technically satisfied. But "hard-constrained" in the paper should match "clamped sigmoid" in the code, not "HardSigmoid" as the plan says.
+
+### WI-3: Stellar Params Fallback Coefficients Hardcoded
+
+**File**: [position_aware_attention.py](file:///c:/Users/kanch/Desktop/manta/manta/models/components/position_aware_attention.py#L83-L98)
+
+When stellar metadata is sparse (< 3 features), the code falls back to solar values `u1=0.4, u2=0.25`. When metadata has Teff/logg/feh, it uses a linear approximation (line 96-98). This approximation is undocumented — no citation for the coefficients `3e-5`, `0.05`, `0.03` etc.
+
+**Fix**: Either cite Claret & Bloemen (2011) or similar LD table interpolation, or mark as "approximate" with a TODO.
+
+---
+
+## 5. WHAT IS DONE WELL
+
+### ✅ Architecture Integrity
+- All 5 physics-derived components are implemented as **independent, clean PyTorch modules** — not hacked into a monolithic model
+- Each component has a module-level docstring explaining which constraint it implements
+- The `MANTA.forward()` method is clearly annotated with constraint tags (`# Constraint 1:`, `# Constraint 5:`) at every step
+- No unexplained CNN layers — every convolutional layer has a comment explaining its physical purpose
+
+### ✅ Palindromic Convolution (Constraint 4)
+- `PalindromicConv1d` is mathematically correct: half-kernel parameterization with mirror concatenation
+- Test `test_palindromic_symmetry` verifies `kernel == flip(kernel)` with tight tolerance
+- The SymmetricTransitEncoder correctly stacks palindromic layers with EllipticMish — no ReLU leaks
+- Kernel sizes (9, 7, 5) are odd as required and configurable
+
+### ✅ Parallel Frequency Branches (Constraint 5 — Architecture)
+- Three genuinely parallel branches: `GranulationBranch`, `AsteroseismologyBranch`, `StarspotBranch`
+- Kernel sizes are physically motivated and match timescale hierarchy (15→dilated for granulation, 5/3 for astero, 21/11 for starspot)
+- Branches are concatenated, not sequential — true parallelism
+- Branch feature maps are cached for visualization (`get_feature_maps()`)
+
+### ✅ Data Pipeline Quality
+- Robust NaN handling with configurable strategies (`hybrid`, `interpolate`, `mask`)
+- Star-level train/val/test splitting prevents leakage (`split_dataset` groups by Kepler ID)
+- Phase folding and binning are correct with median binning
+- Transit injection uses batman with proper Mandel-Agol model and varied limb-darkening coefficients
+
+### ✅ Training Infrastructure
+- Kaggle-aware emergency checkpointing with session time estimation
+- Full state saving (model + optimizer + scheduler + metrics + config)
+- Focal BCE loss with physically motivated justification
+- Gradient clipping for attention stability
+- Early stopping on validation AUC-ROC
+
+### ✅ Config System
+- Strongly typed dataclass configuration with validation
+- Physical constants are named and documented (`KEPLER_LONG_CADENCE_MINUTES`)
+- Config validation catches physically impossible values (e.g., `rp_rs_max > 0.2`)
+
+### ✅ Code Quality
+- Consistent type annotations throughout
+- NumPy-style docstrings on every public method with parameter/return documentation
+- Physically meaningful variable names (`limb_darkening_bias`, `palindromic_kernel`, `rotation_freq`)
+- Proper logging at INFO/DEBUG levels
+
+### ✅ Testing Foundation
+- Output bounds test (Constraint 3): verifies all outputs in `[1e-6, 1-1e-6]`
+- Gradient flow test: verifies all parameters receive gradients
+- Data pipeline tests: NaN handling, phase fold centering, reconstruction error
+- Tests use synthetic data — no network calls
+
+---
+
+## 6. PRIORITY FIX LIST
+
+| # | Fix | Effort | Why First |
+|---|-----|--------|-----------|
+| **1** | **PV-1**: Move frequency decomposition to pre-fold raw time-series, or reframe Constraint 5 claim | 2-3 days | A stellar physics reviewer WILL catch this. Applying FFT to phase-folded data is physically nonsensical for the claimed purpose. |
+| **2** | **CF-1**: Reframe or fix position-aware attention's relationship to actual stellar disk position | 1-2 days | The mismatch between the paper's claim ("position on stellar disk") and the code ("position in folded time-series") will be caught by any careful reviewer. |
+| **3** | **MC-2**: Add test verifying frequency branch selectivity | 0.5 day | Feed pure sine waves at granulation/astero/starspot frequencies into each branch separately — they must respond differently. |
+| **4** | **CF-2**: Add test verifying attention differs for different stellar parameters | 0.5 day | Critical physics test: same input, different u1/u2 → different output. |
+| **5** | **WI-1**: Strengthen or honestly re-state the Bessel-K0 connection to elliptic integrals | 0.5 day | Don't claim mathematical derivation if it's qualitative inspiration. Reviewers at Nature Astronomy will check. |
+| **6** | **MC-3**: Add integration test with realistic transit signal | 0.5 day | Create a synthetic Mandel-Agol transit + noise, run full forward pass, verify reasonable output. |
+| **7** | **PV-3**: Fix starspot frequency mask for fast rotators | 0.5 day | Small code fix but physically important. |
+| **8** | **MC-1**: Add `scripts/predict.py` for single-target inference | 1 day | Required for reproducibility and reviewer testing. |
+| **9** | **MC-6**: Pin all dependency versions in requirements.txt | 10 min | Trivial but necessary for publication. |
+| **10** | **WI-3**: Cite source for LD coefficient approximation or use a lookup table | 0.5 day | Unsourced magic numbers are a red flag in astrophysics papers. |
+
+---
+
+## 7. OVERALL VERDICT
+
+### **NEEDS MAJOR FIXES** (2-3 weeks of focused work)
+
+**Rationale**: The codebase is architecturally sound and impressively documented, but has two physics-level issues that would cause peer review rejection:
+
+1. **Frequency decomposition on phase-folded data** (PV-1) fundamentally undermines Constraint 5's physical claim. This needs either a pipeline restructuring (decompose raw → fold each band) or an honest reframing in the paper.
+
+2. **Position-aware attention does not actually encode stellar disk position** (CF-1). It encodes position within the folded time-series, which is related but not identical to what the paper claims.
+
+Both of these are fixable without architectural rethinking — they're about how the physics connects to the code, not about the code itself. The underlying modules (palindromic conv, parallel branches, bounded output, EllipticMish) are all correctly implemented and well-tested for their mathematical properties.
+
+After fixing PV-1, CF-1, and adding the missing physics tests (CF-2, MC-2, MC-3), this codebase will be competitive for a strong workshop paper or ICML/NeurIPS submission, and with polished paper writing, potentially a top venue in either the ML or astrophysics community.
+
+**The glass is 80% full.** The 20% that's empty is the difference between "this has physics-inspired components" and "this rigorously derives architecture from physics" — and the latter is the paper's central claim.

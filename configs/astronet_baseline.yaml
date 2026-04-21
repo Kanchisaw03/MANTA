@@ -1,0 +1,63 @@
+# AstroNet baseline configuration.
+# Hyperparameters mirror the Shallue & Vanderburg (2018) baseline behavior.
+
+seed: 42
+device: cuda
+output_dir: outputs
+
+data:
+  tce_catalog_url: "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query=select+*+from+q1_q17_dr25_tce&format=csv"
+  cache_dir: data/cache
+  processed_dir: data/processed
+  diagnostics_dir: outputs/diagnostics
+  max_download_workers: 8
+  download_retries: 3
+  timeout_seconds: 30.0
+  nan_strategy: hybrid
+  normalization_method: spline
+  sigma_clip_threshold: 5.0
+  global_view_bins: 2001
+  local_view_bins: 201
+  kepler_cadence_days: 0.02043361111111111
+
+augmentation:
+  use_augmentation: false
+  n_augmentations_per_positive: 0
+  rp_rs_min: 0.01
+  rp_rs_max: 0.2
+  impact_parameter_min: 0.0
+  impact_parameter_max: 0.9
+  period_min_days: 1.0
+  period_max_days: 200.0
+
+model:
+  d_model: 128
+  n_heads: 4
+  stellar_radius_bins: 64
+  granulation_channels: 32
+  astero_channels: 32
+  starspot_channels: 32
+  symmetric_base_channels: 32
+  symmetric_kernel_sizes: [9, 7, 5]
+  local_input_length: 201
+  global_input_length: 2001
+
+training:
+  batch_size: 64
+  num_workers: 4
+  learning_rate: 0.00001
+  weight_decay: 0.0
+  max_epochs: 50
+  grad_clip_norm: 1.0
+  warmup_epochs: 0
+  early_stopping_patience: 5
+  min_lr: 0.000001
+  focal_gamma: 2.0
+  focal_alpha: 0.75
+  checkpoint_dir: checkpoints/astronet
+  emergency_checkpoint_minutes_left: 30.0
+
+evaluation:
+  threshold: 0.5
+  bootstrap_samples: 1000
+  bootstrap_ci: 0.95

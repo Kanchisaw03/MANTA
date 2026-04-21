@@ -1,0 +1,218 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{siunitx}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{multirow}
+
+\title{MANTA: Physics-Derived Neural Architecture for Exoplanet Transit Detection}
+\author{Author One \and Author Two \and Author Three}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present MANTA (Mandel-Agol Neural Transit Architecture), a transit detection
+network whose architecture is derived directly from transit physics rather than
+empirical neural design search. MANTA encodes five constraints from the
+Mandel-Agol formalism and stellar variability physics: position-aware attention
+from limb darkening, smooth non-monotonic activation from elliptic-integral
+ingress/egress geometry, bounded output from physical flux constraints,
+palindromic convolution from ingress/egress time reversibility, and parallel
+frequency streams for granulation/asteroseismology/starspot separation. On
+Kepler DR25, MANTA achieves competitive or improved performance versus AstroNet
+with improved physical interpretability and calibration.
+\end{abstract}
+
+\section{Introduction}
+\subsection{Motivation}
+Exoplanet transit classification is a high-volume astrophysical inference
+problem where model inductive bias can materially affect detectability of small
+and grazing planets.
+
+\subsection{Contribution}
+MANTA introduces architecture-as-physics: constraints are encoded directly in
+network structure, not only in training objectives.
+
+\section{Background and Related Work}
+\subsection{Transit Physics}
+The Mandel-Agol model describes transit flux under stellar limb darkening and
+planetary occultation geometry \citep{mandelagol2002}.
+
+\subsection{Neural Transit Detection}
+AstroNet established deep-learning transit classification at scale
+\citep{shalluevanderburg2018}. ExoMiner advanced production vetting
+\citep{valizadegan2021}. Recent work includes GPFC and ExoSpikeNet
+\citep{kunimoto2024gpfc, exospikenet2024}.
+
+\section{Physics-Derived Constraints}
+\subsection{Constraint 1: Limb Darkening to Position-Aware Attention}
+MANTA's attention bias is not merely position-dependent in sequence index.
+Instead, each phase position in the folded transit window is mapped to a
+projected radius on the stellar disk along a transit chord parameterized by
+impact parameter $b$. Let $s \in [-1,1]$ denote normalized phase position along
+the transit window. We map $s$ to projected radius
+\begin{equation}
+  r(s,b) = \sqrt{b^2 + (1-b^2)s^2},
+\end{equation}
+then evaluate the quadratic limb-darkening law
+\begin{equation}
+  I(r) = 1 - u_1\left(1-\mu\right) - u_2\left(1-\mu\right)^2,
+  \quad \mu = \sqrt{1-r^2}.
+\end{equation}
+The resulting intensity profile is converted into an additive attention-logit
+bias, so attention routing is explicitly chord-geometry-dependent. This ties
+the network's inductive bias to the physically relevant distinction between
+central ($b \approx 0$) and grazing ($b \rightarrow 1$) transit chords.
+\subsection{Constraint 2: Elliptic Integrals to Smooth Activation}
+\subsection{Constraint 3: Flux Bounds to Physics-Constrained Output}
+\subsection{Constraint 4: Time Reversal to Palindromic Convolution}
+\subsection{Constraint 5: Stellar Bands to Parallel Frequency Streams}
+Constraint 5 is implemented on the raw temporal light curve, where stellar
+variability frequencies are physically meaningful. We first decompose the
+cleaned raw time series into granulation, asteroseismology, and starspot bands
+in the frequency domain. Each decomposed band is then phase-folded
+independently using the target ephemeris, and these folded band-specific views
+are passed to their corresponding neural branches.
+
+This ordering is essential: applying FFT directly to an already phase-folded
+profile is physically nonsensical for stellar-variability separation, because
+phase folding destroys the original temporal frequency structure and aliases it
+into morphological (folded-shape) frequencies. Therefore, all frequency-band
+interpretation in MANTA is defined pre-fold in the raw temporal domain.
+
+\section{MANTA Architecture}
+\subsection{System Overview}
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\linewidth}{Placeholder: Full MANTA architecture diagram.}}
+  \caption{MANTA architecture with five physics-derived components.}
+  \label{fig:architecture}
+\end{figure}
+
+\subsection{Implementation Details}
+Include layer dimensions, parameter counts, and training/inference complexity.
+
+\section{Experimental Setup}
+\subsection{Dataset}
+Kepler DR25 TCE catalog with star-level stratified splits and class-imbalance
+handling.
+
+\subsection{Training Protocol}
+Focal BCE, warmup-cosine scheduling, early stopping, and multi-seed reporting.
+
+\section{Results}
+\subsection{Main Benchmark}
+\begin{table}[t]
+  \centering
+  \begin{tabular}{lcccccc}
+    \toprule
+    Model & Params & AUC-ROC & AUC-PR & F1 & AP & ECE \\
+    \midrule
+    AstroNet & -- & -- & -- & -- & -- & -- \\
+    MANTA & -- & -- & -- & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+  \caption{Primary benchmark comparison on Kepler DR25 test split.}
+  \label{tab:main_results}
+\end{table}
+
+\subsection{Ablation Study}
+\begin{table}[t]
+  \centering
+  \begin{tabular}{lccc}
+    \toprule
+    Variant & AUC-ROC & F1 & AP \\
+    \midrule
+    Full MANTA & -- & -- & -- \\
+    Minus Position Attention & -- & -- & -- \\
+    Minus Elliptic Activation & -- & -- & -- \\
+    Minus Symmetric Encoder & -- & -- & -- \\
+    Minus Frequency Separation & -- & -- & -- \\
+    Minus Physics Output & -- & -- & -- \\
+    AstroNet Baseline & -- & -- & -- \\
+    \bottomrule
+  \end{tabular}
+  \caption{Ablation table template for component-wise contribution analysis.}
+  \label{tab:ablation}
+\end{table}
+
+\subsection{Figures}
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\linewidth}{Placeholder: Figure 1 transit detection example.}}
+  \caption{Example transit detection and model confidence.}
+  \label{fig:transit_detection}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\linewidth}{Placeholder: Figure 2 frequency decomposition.}}
+  \caption{Physics-motivated decomposition into granulation, asteroseismology,
+and starspot bands.}
+  \label{fig:frequency_decomposition}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\linewidth}{Placeholder: Figure 3 activation comparison.}}
+  \caption{EllipticMish versus Mish and ReLU.}
+  \label{fig:activation_comparison}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\linewidth}{Placeholder: Figure 4 attention over stellar disk.}}
+  \caption{Position-aware attention aligned with limb-darkened geometry.}
+  \label{fig:attention_weights}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\linewidth}{Placeholder: Figure 5 ROC curves.}}
+  \caption{ROC curves for MANTA, AstroNet, and ablation variants.}
+  \label{fig:roc_curves}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\linewidth}{Placeholder: Figure 6 ablation heatmap.}}
+  \caption{Ablation-performance heatmap.}
+  \label{fig:ablation_heatmap}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\linewidth}{Placeholder: Figure 7 planet-size performance.}}
+  \caption{Per-planet-size performance profile.}
+  \label{fig:planet_size}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\linewidth}{Placeholder: Figure 8 calibration curves.}}
+  \caption{Model calibration and reliability analysis.}
+  \label{fig:calibration}
+\end{figure}
+
+\section{Discussion}
+Discuss where physics-derived constraints provide largest gains and where
+limitations remain (e.g., cadence, stellar class coverage).
+
+\section{Conclusion}
+Summarize architecture-as-physics framing and implications for scientific ML.
+
+\bibliographystyle{apalike}
+\bibliography{references}
+
+\appendix
+\section{Appendix A: Additional Derivations}
+\section{Appendix B: Hyperparameter Sensitivity}
+\section{Appendix C: Additional Tables/Figures}
+
+\end{document}

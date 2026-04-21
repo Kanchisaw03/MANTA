@@ -1,0 +1,116 @@
+# MANTA Audit Re-Check — Post-Fix Verification
+
+**Date**: 2026-04-21  
+**Scope**: Verify fixes for CF-1, CF-2, PV-1, MC-2, MC-3 from original audit
+
+---
+
+## Test Suite Result
+
+```
+18 passed, 1 skipped in 22.75s
+```
+
+The 1 skip is `test_transit_injection_parameter_recovery` (batman-package not installed in test env) — expected and acceptable.
+
+---
+
+## Fix Verification
+
+### ✅ PV-1 RESOLVED: Frequency Decomposition Now on Raw Time-Series
+
+**What changed** ([dataset.py:236-296](file:///c:/Users/kanch/Desktop/manta/manta/data/dataset.py#L236-L296)):
+- Line 242: `self._decomposer.decompose(flux=clipped_flux, time=final_time, ...)` — decomposition now runs on cleaned raw flux BEFORE phase folding
+- Lines 261-296: Each band (`granulation`, `asteroseismology`, `starspot`) is phase-folded INDEPENDENTLY using `phase_fold()`
+- The stacked `freq_bands` array is now physically valid: it contains frequency-separated components that were decomposed in the temporal domain and then individually folded
+
+**Verdict**: This is exactly right. The FFT operates on the raw temporal series where the frequency bands are physically meaningful, and each band is folded separately to create the model inputs. Constraint 5 is now defensible.
+
+### ✅ CF-1 RESOLVED: Position-Aware Attention Uses Impact Parameter
+
+**What changed** ([position_aware_attention.py:102-148](file:///c:/Users/kanch/Desktop/manta/manta/models/components/position_aware_attention.py#L102-L148)):
+- New method `_extract_impact_parameter()` (line 102) extracts `b` from `stellar_params[:, 4]`
+- `_compute_limb_darkening_bias()` now takes `impact_parameter` argument (line 115)
+- Line 138: Projected disk radius now computed as `r = sqrt(b² + (1-b²)·s²)` — this maps each phase position `s` along the transit chord at impact parameter `b` to the actual stellar disk radius `r`
+- The `mu = sqrt(1 - r²)` and limb-darkening intensity are then computed from this chord-aware radius
+
+**Physics check**: For `b=0` (central transit), `r = |s|` — the planet crosses the full diameter, so phase maps linearly to disk radius. For `b=0.9` (near-limb transit), `r ≈ 0.9` everywhere — the planet stays near the limb throughout, so the limb-darkening bias is nearly uniform (low intensity). This is physically correct. Constraint 1 now genuinely encodes "position on the stellar disk" rather than just "position in the time-series."
+
+### ✅ CF-2 RESOLVED: Test Verifies Attention Differs for Different Impact Parameters
+
+**What changed** ([test_models.py:59-81](file:///c:/Users/kanch/Desktop/manta/tests/test_models.py#L59-L81)):
+- `test_attention_changes_with_impact_parameter()` creates identical inputs (`x_single.repeat(2,1,1)`)
+- Stellar params differ ONLY in impact parameter: `b=0.1` vs `b=0.9`
+- Asserts outputs are NOT equal (line 76) and attention maps have meaningful differences (line 81: `mean_abs_diff > 1e-5`)
+- Dropout is disabled (`dropout=0.0`) and model is in `eval()` mode — eliminating stochasticity, so any difference is purely from the physics bias
+
+**Verdict**: This is a clean, decisive physics test. Passes correctly.
+
+### ✅ MC-2 RESOLVED: Frequency Branch Selectivity Test
+
+**What changed** ([test_models.py:84-101](file:///c:/Users/kanch/Desktop/manta/tests/test_models.py#L84-L101)):
+- Feeds a sine wave into only the granulation channel vs only the astero channel
+- Asserts outputs differ (line 99) — confirming branches are truly parallel and selective
+- Validates feature map keys match the expected branch names (line 101)
+
+### ✅ MC-3 RESOLVED: Realistic Transit Integration Test
+
+**What changed** ([test_models.py:104-156](file:///c:/Users/kanch/Desktop/manta/tests/test_models.py#L104-L156)):
+- Synthesizes a realistic light curve with starspot, granulation, asteroseismology, and Gaussian transit dip
+- Decomposes using `FrequencyDecomposer` on raw time-series
+- Phase-folds each band independently (matching the dataset pipeline)
+- Runs full MANTA forward pass
+- Verifies output shape, finiteness, and [1e-6, 1-1e-6] bounds
+
+### ✅ Additional: Frequency Decomposition Band Selectivity Test
+
+**What changed** ([test_data_pipeline.py:76-94](file:///c:/Users/kanch/Desktop/manta/tests/test_data_pipeline.py#L76-L94)):
+- Constructs a flux with known starspot (0.25 c/d), granulation (2.4 c/d), and astero (9.0 c/d) components
+- Decomposes and checks correlation of each output band with its source component
+- Thresholds: `gran > 0.55`, `astero > 0.75`, `starspot > 0.75`
+
+### ✅ MANTA Model: freq_bands Now Required
+
+**What changed** ([manta.py:120-124](file:///c:/Users/kanch/Desktop/manta/manta/models/manta.py#L120-L124)):
+- Forward pass raises `ValueError` if `freq_bands` is missing from batch
+- `_decompose_global_view_torch` now raises `RuntimeError` instead of silently producing invalid decomposition
+- `_prepare_stellar_params()` handles both 4-feature (legacy) and 5-feature (with impact parameter) tensors
+
+---
+
+## Remaining Items from Original Audit (Not Yet Addressed)
+
+| # | Item | Status | Priority |
+|---|------|--------|----------|
+| WI-1 | Bessel-K0 / elliptic integral connection | Unfixed — still aesthetically weak | Medium |
+| PV-3 | Starspot mask cap at F_GRAN for fast rotators | Unfixed | Low |
+| MC-1 | No inference script (`predict.py`) | Missing | Medium |
+| MC-4 | No per-ablation YAML configs | Missing | Low |
+| MC-5 | No visualization/figure generation module | Missing | Low |
+| MC-6 | `requirements.txt` not version-pinned | Unfixed | Low |
+| WI-2 | Output uses sigmoid+clamp vs HardSigmoid | Documentation gap | Low |
+| WI-3 | LD coefficient approximation uncited | Unfixed | Low |
+
+---
+
+## Updated Verdict
+
+### **NEEDS MINOR FIXES** (< 1 week of work)
+
+The three paper-critical issues are fully resolved:
+
+1. **Constraint 5** is now physically honest — FFT on raw time-series, then per-band phase folding
+2. **Constraint 1** now genuinely uses impact parameter to compute projected disk position
+3. **Physics tests** verify all core claims with clean, deterministic assertions
+
+The remaining items (WI-1, PV-3, MC-1, MC-6, WI-3) are documentation, tooling, and edge-case fixes — none of them would cause a reviewer to reject the paper. They should be addressed before submission for polish, but the architecture and physics are now defensible.
+
+**Upgraded from NEEDS MAJOR FIXES → NEEDS MINOR FIXES.**
+
+### Recommendation for Next Step
+
+Yes — update `manta_paper.tex` to align Constraint 1 and Constraint 5 language with the now-honest implementation:
+
+- **Constraint 1**: Should state the attention bias maps each phase position to projected disk radius along a transit chord parameterized by impact parameter `b`, then applies the quadratic limb-darkening law at that radius. Not just "position-dependent" — it's "chord-geometry-dependent."
+  
+- **Constraint 5**: Should state decomposition is performed on the raw temporal light curve (where stellar frequency bands are physically meaningful), and each band is independently phase-folded before feeding into its specialized branch. Explicitly note that FFT on folded data would be physically nonsensical.

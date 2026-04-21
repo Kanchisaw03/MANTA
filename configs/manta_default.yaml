@@ -1,0 +1,108 @@
+# MANTA default configuration.
+# Values follow physically motivated defaults from Mandel-Agol transit geometry
+# and Kepler long-cadence mission characteristics.
+
+seed: 42
+device: cuda
+output_dir: outputs
+
+data:
+  # NASA Exoplanet Archive DR25 TCE endpoint.
+  tce_catalog_url: "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query=select+*+from+q1_q17_dr25_tce&format=csv"
+  # Local cache for raw light curves and downloaded metadata.
+  cache_dir: data/cache
+  # Destination for preprocessed examples used by training.
+  processed_dir: data/processed
+  # Diagnostic figure directory (decomposition, normalization, etc.).
+  diagnostics_dir: outputs/diagnostics
+  # ThreadPool workers for parallel API download.
+  max_download_workers: 8
+  # Request retry count for intermittent network failures.
+  download_retries: 3
+  # HTTP timeout per request in seconds.
+  timeout_seconds: 30.0
+  # NaN strategy: interpolate small gaps and mask large gaps.
+  nan_strategy: hybrid
+  # Spline preserves transit depths while removing baseline drift.
+  normalization_method: spline
+  # Sigma clipping threshold tuned for Kepler outlier rejection.
+  sigma_clip_threshold: 5.0
+  # AstroNet-compatible global view resolution.
+  global_view_bins: 2001
+  # AstroNet-compatible local view resolution.
+  local_view_bins: 201
+  # Kepler long cadence (29.4244 minutes) in days.
+  kepler_cadence_days: 0.02043361111111111
+
+augmentation:
+  # Enable synthetic transit injection and positive-class augmentation.
+  use_augmentation: true
+  # Extra stochastic realizations per positive example.
+  n_augmentations_per_positive: 2
+  # Physically valid Rp/Rs range.
+  rp_rs_min: 0.01
+  rp_rs_max: 0.2
+  # Physically valid impact parameter range.
+  impact_parameter_min: 0.0
+  impact_parameter_max: 0.9
+  # Orbital period range in days for injected transits.
+  period_min_days: 1.0
+  period_max_days: 200.0
+
+model:
+  # Latent feature width for fusion and attention.
+  d_model: 128
+  # Multi-head attention heads (must divide d_model).
+  n_heads: 4
+  # Annular bins representing projected stellar disk radii.
+  stellar_radius_bins: 64
+  # Channels for granulation-frequency branch.
+  granulation_channels: 32
+  # Channels for asteroseismology-frequency branch.
+  astero_channels: 32
+  # Channels for starspot-frequency branch.
+  starspot_channels: 32
+  # Base channels for symmetric transit encoder.
+  symmetric_base_channels: 32
+  # Odd palindromic kernels to enforce ingress/egress symmetry.
+  symmetric_kernel_sizes: [9, 7, 5]
+  # Local phase-folded vector length.
+  local_input_length: 201
+  # Global phase-folded vector length.
+  global_input_length: 2001
+
+training:
+  # Batch size balancing memory and gradient estimate quality.
+  batch_size: 64
+  # DataLoader workers for CPU prefetch.
+  num_workers: 4
+  # AdamW initial learning rate.
+  learning_rate: 0.0003
+  # Weight decay for regularization.
+  weight_decay: 0.01
+  # Total epochs for full convergence and ablation parity.
+  max_epochs: 80
+  # Clip gradient norm for attention stability.
+  grad_clip_norm: 1.0
+  # Warmup protects symmetric kernels early in training.
+  warmup_epochs: 5
+  # Early stop on validation AUC plateaus.
+  early_stopping_patience: 10
+  # Minimum learning rate for cosine decay floor.
+  min_lr: 0.000001
+  # Focal loss gamma for hard-example emphasis.
+  focal_gamma: 2.0
+  # Focal loss alpha for positive-class weighting.
+  focal_alpha: 0.75
+  # Directory for checkpoints and emergency snapshots.
+  checkpoint_dir: checkpoints
+  # Trigger emergency checkpoint if Kaggle session below this threshold.
+  emergency_checkpoint_minutes_left: 30.0
+
+evaluation:
+  # Classification threshold used for precision/recall/F1.
+  threshold: 0.5
+  # Bootstrap iterations for confidence intervals.
+  bootstrap_samples: 1000
+  # Confidence interval width.
+  bootstrap_ci: 0.95
