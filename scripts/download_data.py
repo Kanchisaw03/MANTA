@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from manta.data.downloader import batch_download, download_kepler_tce_catalog
 from manta.utils.config import load_config
@@ -56,13 +57,25 @@ def main() -> None:
 
     # Optional subset controls for quick Colab runs.
     kepid_col = _infer_column(tce_df, ("kepid", "kepler_id"))
-    quarter_col = _infer_column(tce_df, ("quarter", "koi_quarter"))
+    try:
+        quarter_col = _infer_column(tce_df, ("quarter", "koi_quarter"))
+    except KeyError:
+        quarter_col = None
+        logging.warning(
+            "No quarter column found in catalog; will build downloads from selected stars "
+            "and requested quarters"
+        )
 
     filtered_df = tce_df.copy()
-    if args.quarters:
+    if args.quarters and quarter_col is not None:
         quarter_set = {int(q) for q in args.quarters}
         filtered_df = filtered_df[filtered_df[quarter_col].isin(quarter_set)].copy()
         logging.info("Filtered to quarters %s: %d rows", sorted(quarter_set), len(filtered_df))
+    elif args.quarters and quarter_col is None:
+        logging.info(
+            "Requested quarters %s will be applied during star-quarter expansion",
+            sorted({int(q) for q in args.quarters}),
+        )
 
     if args.n_stars is not None:
         if args.n_stars <= 0:
@@ -81,8 +94,40 @@ def main() -> None:
     if filtered_df.empty:
         raise ValueError("No rows left to download after filtering by stars/quarters")
 
+    if quarter_col is None:
+        if args.quarters:
+            quarter_values = sorted({int(q) for q in args.quarters})
+        else:
+            quarter_values = list(range(1, 18))
+            logging.warning(
+                "No --quarters specified and catalog has no quarter field; defaulting to quarters 1..17"
+            )
+
+        selected_stars = filtered_df[kepid_col].dropna().astype(int).unique()
+        if selected_stars.size == 0:
+            raise ValueError("No stars available for quarter expansion")
+
+        pair_rows = [
+            {"kepid": int(star_id), "quarter": int(quarter)}
+            for star_id in selected_stars
+            for quarter in quarter_values
+        ]
+        download_df = pd.DataFrame(pair_rows)
+        logging.info(
+            "Constructed %d star-quarter pairs from %d stars and %d quarters",
+            len(download_df),
+            len(selected_stars),
+            len(quarter_values),
+        )
+    else:
+        download_df = filtered_df[[kepid_col, quarter_col]].dropna().copy()
+        download_df = download_df.rename(columns={kepid_col: "kepid", quarter_col: "quarter"})
+
+    if download_df.empty:
+        raise ValueError("No star-quarter pairs available for download")
+
     workers = args.max_workers if args.max_workers is not None else config.data.max_download_workers
-    summary = batch_download(tce_df=filtered_df, cache_dir=cache_dir / "raw", max_workers=workers)
+    summary = batch_download(tce_df=download_df, cache_dir=cache_dir / "raw", max_workers=workers)
 
     logging.info(
         "Download complete: downloaded=%d skipped=%d failed=%d",
